@@ -64,35 +64,63 @@ export async function fetchMarketPrices(market: Market): Promise<MarketPrices> {
   };
 }
 
-export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
-  const url = `${BASE_URL}/markets?_data=routes%2Fmarkets._index`;
+// Cache for discovered market IDs to avoid re-scanning
+let knownMaxId = 720;
 
-  const response = await fetch(url, {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "MyriadArbBot/1.0",
-    },
-  });
+/**
+ * Fetch a single market by ID
+ */
+async function fetchMarketById(id: number): Promise<MyriadMarket | null> {
+  try {
+    const url = `${BASE_URL}/markets/${id}?_data=routes%2Fmarkets.%24marketId`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "MyriadArbBot/1.0",
+      },
+    });
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch markets: ${response.status}`);
+    if (response.ok) {
+      const data = await response.json();
+      return data.market || null;
+    }
+  } catch {
+    // Ignore fetch errors for individual markets
   }
+  return null;
+}
 
-  const data = await response.json();
+/**
+ * Fetch all open binary markets by scanning IDs in parallel batches.
+ * The Myriad API pagination doesn't work correctly, so we probe individual IDs.
+ */
+export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
+  const markets: MyriadMarket[] = [];
+  const batchSize = 30; // Concurrent requests per batch
 
-  // Combine featured and paginated markets
-  const featured = data.featuredMarkets || [];
-  const paginatedData = data.paginatedMarkets?.initialData; const paginated = Array.isArray(paginatedData) ? paginatedData : [];
+  // Scan from ID 1 to knownMaxId
+  for (let start = 1; start <= knownMaxId; start += batchSize) {
+    const promises: Promise<MyriadMarket | null>[] = [];
 
-  // Deduplicate by ID
-  const marketMap = new Map<number, MyriadMarket>();
-  for (const m of [...featured, ...paginated]) {
-    if (!marketMap.has(m.id)) {
-      marketMap.set(m.id, m);
+    for (let id = start; id < Math.min(start + batchSize, knownMaxId + 1); id++) {
+      promises.push(fetchMarketById(id));
+    }
+
+    const results = await Promise.all(promises);
+
+    for (const market of results) {
+      // Only include open binary markets
+      if (market && market.state === "open" && market.outcomes?.length === 2) {
+        markets.push(market);
+        // Update max ID if we find higher
+        if (market.id > knownMaxId) {
+          knownMaxId = market.id + 50;
+        }
+      }
     }
   }
 
-  return Array.from(marketMap.values());
+  return markets;
 }
 
 // Utility to scan all markets for arbitrage opportunities
