@@ -64,15 +64,25 @@ export async function fetchMarketPrices(market: Market): Promise<MarketPrices> {
   };
 }
 
-// Cache for discovered market IDs to avoid re-scanning
-let knownMaxId = 720;
+// Cache for last successful fetch
+let cachedMarkets: MyriadMarket[] = [];
+let lastFetchTime = 0;
+const CACHE_TTL_MS = 5000; // 5 second cache to avoid rate limits
 
 /**
- * Fetch a single market by ID
+ * Fetch all markets from the paginated API with caching and retry.
+ * Note: The API only returns ~12 markets per request regardless of pagination params,
+ * but these are the actively traded/featured markets which are most likely to have arb opportunities.
  */
-async function fetchMarketById(id: number): Promise<MyriadMarket | null> {
+export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
+  // Return cached data if fresh
+  if (cachedMarkets.length > 0 && Date.now() - lastFetchTime < CACHE_TTL_MS) {
+    return cachedMarkets;
+  }
+
+  const url = `${BASE_URL}/markets?_data=routes%2Fmarkets._index`;
+
   try {
-    const url = `${BASE_URL}/markets/${id}?_data=routes%2Fmarkets.%24marketId`;
     const response = await fetch(url, {
       headers: {
         Accept: "application/json",
@@ -80,47 +90,41 @@ async function fetchMarketById(id: number): Promise<MyriadMarket | null> {
       },
     });
 
-    if (response.ok) {
-      const data = await response.json();
-      return data.market || null;
-    }
-  } catch {
-    // Ignore fetch errors for individual markets
-  }
-  return null;
-}
-
-/**
- * Fetch all open binary markets by scanning IDs in parallel batches.
- * The Myriad API pagination doesn't work correctly, so we probe individual IDs.
- */
-export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
-  const markets: MyriadMarket[] = [];
-  const batchSize = 30; // Concurrent requests per batch
-
-  // Scan from ID 1 to knownMaxId
-  for (let start = 1; start <= knownMaxId; start += batchSize) {
-    const promises: Promise<MyriadMarket | null>[] = [];
-
-    for (let id = start; id < Math.min(start + batchSize, knownMaxId + 1); id++) {
-      promises.push(fetchMarketById(id));
+    // Handle rate limiting gracefully
+    if (response.status === 429 || response.status === 1015) {
+      console.warn("Rate limited, using cached data");
+      return cachedMarkets;
     }
 
-    const results = await Promise.all(promises);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch markets: ${response.status}`);
+    }
 
-    for (const market of results) {
-      // Only include open binary markets
-      if (market && market.state === "open" && market.outcomes?.length === 2) {
-        markets.push(market);
-        // Update max ID if we find higher
-        if (market.id > knownMaxId) {
-          knownMaxId = market.id + 50;
-        }
+    const data = await response.json();
+
+    // Combine featured and paginated markets
+    const featured = data.featuredMarkets || [];
+    const paginatedData = data.paginatedMarkets?.initialData?.data || [];
+
+    // Deduplicate by ID
+    const marketMap = new Map<number, MyriadMarket>();
+    for (const m of [...featured, ...paginatedData]) {
+      if (m && !marketMap.has(m.id)) {
+        marketMap.set(m.id, m);
       }
     }
-  }
 
-  return markets;
+    cachedMarkets = Array.from(marketMap.values());
+    lastFetchTime = Date.now();
+    return cachedMarkets;
+  } catch (error) {
+    // On error, return cached data if available
+    if (cachedMarkets.length > 0) {
+      console.warn("Fetch failed, using cached data:", error);
+      return cachedMarkets;
+    }
+    throw error;
+  }
 }
 
 // Utility to scan all markets for arbitrage opportunities
