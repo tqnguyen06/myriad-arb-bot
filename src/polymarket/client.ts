@@ -144,11 +144,26 @@ export async function placeLimitOrder(
       side: orderSide,
     });
 
+    // Check if response contains an error
+    if (response && typeof response === "object") {
+      const resp = response as Record<string, unknown>;
+      if (resp.error || resp.status === 400) {
+        const errorMsg = String(resp.error || "Order rejected");
+        console.error(`Order rejected:`, errorMsg);
+        return {
+          success: false,
+          error: errorMsg,
+          details,
+        };
+      }
+    }
+
     console.log(`Order placed:`, response);
 
+    const resp = response as Record<string, unknown>;
     return {
       success: true,
-      orderId: response.orderID || response.id,
+      orderId: String(resp.orderID || resp.id || ""),
       details,
     };
   } catch (error) {
