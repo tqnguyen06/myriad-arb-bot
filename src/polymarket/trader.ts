@@ -73,18 +73,26 @@ async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
     return;
   }
 
-  // Order size in USDC terms (will buy shares worth this much)
-  const orderSize = CONFIG.MAX_ORDER_SIZE;
-
-  // Place a limit order at best bid (trying to buy low)
+  // Calculate number of shares from USDC budget
+  // size parameter = number of shares, not USDC amount
+  const usdcBudget = CONFIG.MAX_ORDER_SIZE;
   const buyPrice = bestBid;
-  const potentialProfit = spread * (orderSize / bestBid); // Approximate shares
+  const numShares = Math.floor(usdcBudget / buyPrice); // How many shares we can buy
+  const orderValue = numShares * buyPrice; // Actual USDC spent
+
+  // Polymarket minimum order is $1
+  if (orderValue < 1) {
+    log(`  Order too small: $${orderValue.toFixed(2)} < $1 minimum`);
+    return;
+  }
+
+  const potentialProfit = spread * numShares;
 
   log(`  📈 TRADING: ${market.question.substring(0, 40)}...`);
-  log(`     Spread: ${spreadPct.toFixed(2)}% | Buy at: ${buyPrice} | Size: ${orderSize}`);
+  log(`     Spread: ${spreadPct.toFixed(2)}% | Buy ${numShares} shares @ ${buyPrice} = $${orderValue.toFixed(2)}`);
   log(`     Potential profit: $${potentialProfit.toFixed(2)}`);
 
-  const result = await placeLimitOrder(tokenId, "BUY", buyPrice, orderSize, CONFIG.DRY_RUN);
+  const result = await placeLimitOrder(tokenId, "BUY", buyPrice, numShares, CONFIG.DRY_RUN);
 
   if (result.success) {
     stats.ordersPlaced++;
@@ -93,7 +101,7 @@ async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
         market: market.question.substring(0, 40),
         side: "BUY",
         price: buyPrice,
-        size: orderSize,
+        size: numShares,
       });
     }
     log(`     ✅ Order placed: ${result.orderId}`);
