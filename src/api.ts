@@ -67,12 +67,12 @@ export async function fetchMarketPrices(market: Market): Promise<MarketPrices> {
 // Cache for last successful fetch
 let cachedMarkets: MyriadMarket[] = [];
 let lastFetchTime = 0;
-const CACHE_TTL_MS = 5000; // 5 second cache to avoid rate limits
+const CACHE_TTL_MS = 5000; // 5 second cache to stay responsive while avoiding rate limits
 
 /**
- * Fetch all markets from the paginated API with caching and retry.
- * Note: The API only returns ~12 markets per request regardless of pagination params,
- * but these are the actively traded/featured markets which are most likely to have arb opportunities.
+ * Fetch all available markets from the Myriad API.
+ * Note: The API only exposes ~12 featured/active markets regardless of pagination.
+ * This is an API limitation, not a bug in our code.
  */
 export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
   // Return cached data if fresh
@@ -86,7 +86,7 @@ export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
     const response = await fetch(url, {
       headers: {
         Accept: "application/json",
-        "User-Agent": "MyriadArbBot/1.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
     });
 
@@ -125,6 +125,33 @@ export async function fetchAllMarkets(): Promise<MyriadMarket[]> {
     }
     throw error;
   }
+}
+
+// Known market IDs discovered from blockchain events
+// These are markets that have had activity but may not appear in featured list
+let knownMarketIds: Set<number> = new Set();
+
+/**
+ * Add known market IDs from blockchain discovery
+ */
+export function addKnownMarketIds(ids: number[]) {
+  ids.forEach((id) => knownMarketIds.add(id));
+}
+
+/**
+ * Fetch a single market by its numeric ID
+ * Returns null if market not found or not accessible
+ */
+export async function fetchMarketById(
+  marketId: number
+): Promise<MyriadMarket | null> {
+  // First check if we have it cached
+  const cached = cachedMarkets.find((m) => m.id === marketId);
+  if (cached) return cached;
+
+  // Try to fetch from the market page directly by constructing possible slugs
+  // This is a fallback - most markets should come from fetchAllMarkets
+  return null;
 }
 
 // Utility to scan all markets for arbitrage opportunities

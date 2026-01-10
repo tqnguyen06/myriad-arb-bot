@@ -31,8 +31,10 @@ export const CONTRACTS = {
 
 // Bot Configuration
 export const BOT_CONFIG = {
-  MIN_PROFIT_THRESHOLD: parseFloat(process.env.MIN_PROFIT_THRESHOLD || "0.01"),
-  POLL_INTERVAL_MS: parseInt(process.env.POLL_INTERVAL_MS || "10000"), // 10s to avoid rate limits
+  // Lower threshold to catch more opportunities (0.5% = $0.50 per $100)
+  MIN_PROFIT_THRESHOLD: parseFloat(process.env.MIN_PROFIT_THRESHOLD || "0.005"),
+  // 10s interval - fast enough to catch brief mispricings
+  POLL_INTERVAL_MS: parseInt(process.env.POLL_INTERVAL_MS || "10000"),
   DRY_RUN: process.env.DRY_RUN === "true",
   MAX_POSITION_SIZE_USDC: 100, // Max $100 per trade to start
 };

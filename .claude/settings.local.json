@@ -9,7 +9,15 @@
       "Bash(timeout 15 npx tsx:*)",
       "Bash(timeout 20 npx tsx:*)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(npm run scan:*)",
+      "Bash(npm run poly:scan:*)",
+      "Bash(timeout 15 npm run poly:bot:*)",
+      "Bash(timeout 20 npm run poly:trade:*)",
+      "Bash(timeout 25 npm run poly:trade:*)",
+      "Bash(timeout 30 npm run poly:trade:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

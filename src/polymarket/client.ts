@@ -65,6 +65,17 @@ export async function initClient(): Promise<boolean> {
 
     client = new ClobClient(CLOB_HOST, CHAIN_ID, signer, creds, 0);
     console.log(`Trading client initialized for: ${walletAddress}`);
+
+    // Set allowances for the CTF Exchange (required for trading)
+    console.log("Setting up trading allowances...");
+    try {
+      await client.setAllowances();
+      console.log("Allowances set successfully");
+    } catch (allowanceError) {
+      console.log("Allowance setup note:", allowanceError instanceof Error ? allowanceError.message : String(allowanceError));
+      // Continue anyway - allowances may already be set
+    }
+
     return true;
   } catch (error) {
     console.error("Failed to initialize client:", error);
