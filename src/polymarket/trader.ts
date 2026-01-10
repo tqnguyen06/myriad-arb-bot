@@ -13,7 +13,9 @@ import {
   isReady,
   placeLimitOrder,
   cancelAllOrders,
+  cancelOrder,
   getOpenOrders,
+  getOrder,
   getWalletAddress,
 } from "./client.js";
 
@@ -26,6 +28,7 @@ const CONFIG = {
   MAX_OPEN_ORDERS: parseInt(process.env.POLY_MAX_ORDERS || "5"), // Max 5 orders
   POLL_INTERVAL_MS: parseInt(process.env.POLY_POLL_INTERVAL || "60000"), // 60 seconds
   MAX_DAILY_LOSS: parseFloat(process.env.POLY_MAX_LOSS || "50"), // Stop if down $50
+  ORDER_TTL_MS: parseInt(process.env.POLY_ORDER_TTL || "300000"), // 5 minutes TTL for orders
 };
 
 // State tracking
@@ -34,12 +37,36 @@ let stats = {
   scansCompleted: 0,
   ordersPlaced: 0,
   ordersFilled: 0,
+  ordersCancelled: 0,
+  sellOrdersPlaced: 0,
   totalProfit: 0,
   totalLoss: 0,
 };
 
-let activeOrders: Map<string, { market: string; side: string; price: number; size: number }> =
-  new Map();
+// Track active BUY orders with metadata for TTL and sell targeting
+interface ActiveOrder {
+  market: string;
+  tokenId: string;
+  side: "BUY" | "SELL";
+  price: number;
+  size: number;
+  targetSellPrice: number; // The ask price we want to sell at
+  placedAt: number; // Timestamp for TTL
+}
+
+let activeOrders: Map<string, ActiveOrder> = new Map();
+
+// Track positions we need to sell (filled BUY orders)
+interface Position {
+  tokenId: string;
+  market: string;
+  size: number;
+  buyPrice: number;
+  targetSellPrice: number;
+  acquiredAt: number;
+}
+
+let positions: Map<string, Position> = new Map(); // tokenId -> Position
 
 function log(msg: string) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -90,7 +117,7 @@ async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
 
   log(`  📈 TRADING: ${market.question.substring(0, 40)}...`);
   log(`     Spread: ${spreadPct.toFixed(2)}% | Buy ${numShares} shares @ ${buyPrice} = $${orderValue.toFixed(2)}`);
-  log(`     Potential profit: $${potentialProfit.toFixed(2)}`);
+  log(`     Target sell @ ${bestAsk} | Potential profit: $${potentialProfit.toFixed(2)}`);
 
   const result = await placeLimitOrder(tokenId, "BUY", buyPrice, numShares, CONFIG.DRY_RUN);
 
@@ -99,14 +126,166 @@ async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
     if (result.orderId) {
       activeOrders.set(result.orderId, {
         market: market.question.substring(0, 40),
+        tokenId,
         side: "BUY",
         price: buyPrice,
         size: numShares,
+        targetSellPrice: bestAsk,
+        placedAt: Date.now(),
       });
     }
     log(`     ✅ Order placed: ${result.orderId}`);
   } else {
     log(`     ❌ Order failed: ${result.error}`);
+  }
+}
+
+/**
+ * Check for filled orders and move them to positions for selling
+ */
+async function checkOrderFills(): Promise<void> {
+  if (activeOrders.size === 0) return;
+
+  log(`Checking ${activeOrders.size} active orders for fills...`);
+
+  for (const [orderId, order] of Array.from(activeOrders.entries())) {
+    // Skip dry-run orders
+    if (orderId.startsWith("dry-run-")) {
+      // Simulate fill after 2 scans for dry run
+      if (Date.now() - order.placedAt > CONFIG.POLL_INTERVAL_MS * 2) {
+        log(`  [DRY RUN] Simulating fill for ${order.market}`);
+        activeOrders.delete(orderId);
+        stats.ordersFilled++;
+
+        if (order.side === "BUY") {
+          // Add to positions to sell
+          positions.set(order.tokenId, {
+            tokenId: order.tokenId,
+            market: order.market,
+            size: order.size,
+            buyPrice: order.price,
+            targetSellPrice: order.targetSellPrice,
+            acquiredAt: Date.now(),
+          });
+        }
+      }
+      continue;
+    }
+
+    try {
+      const orderData = (await getOrder(orderId)) as Record<string, unknown>;
+      const status = String(orderData.status || orderData.order_status || "").toUpperCase();
+
+      if (status === "FILLED" || status === "MATCHED") {
+        log(`  ✅ Order FILLED: ${order.market}`);
+        activeOrders.delete(orderId);
+        stats.ordersFilled++;
+
+        if (order.side === "BUY") {
+          // Add to positions - we need to sell these
+          positions.set(order.tokenId, {
+            tokenId: order.tokenId,
+            market: order.market,
+            size: order.size,
+            buyPrice: order.price,
+            targetSellPrice: order.targetSellPrice,
+            acquiredAt: Date.now(),
+          });
+          log(`     Added to positions for selling @ ${order.targetSellPrice}`);
+        } else if (order.side === "SELL") {
+          // SELL filled - calculate profit
+          const profit = (order.price - order.targetSellPrice) * order.size; // targetSellPrice stores buyPrice for sells
+          stats.totalProfit += profit;
+          log(`     💰 PROFIT: $${profit.toFixed(2)}`);
+        }
+      } else if (status === "CANCELLED" || status === "EXPIRED") {
+        log(`  ⚠️ Order ${status}: ${order.market}`);
+        activeOrders.delete(orderId);
+      }
+      // Otherwise order is still open - keep tracking
+    } catch (error) {
+      // Order may not exist anymore
+      log(`  Failed to check order ${orderId}: ${error}`);
+    }
+  }
+}
+
+/**
+ * Place SELL orders for positions we're holding
+ */
+async function sellPositions(): Promise<void> {
+  if (positions.size === 0) return;
+
+  log(`Placing SELL orders for ${positions.size} positions...`);
+
+  for (const [tokenId, position] of Array.from(positions.entries())) {
+    log(`  Selling ${position.size} shares of ${position.market} @ ${position.targetSellPrice}`);
+
+    const result = await placeLimitOrder(
+      tokenId,
+      "SELL",
+      position.targetSellPrice,
+      position.size,
+      CONFIG.DRY_RUN
+    );
+
+    if (result.success) {
+      stats.sellOrdersPlaced++;
+      positions.delete(tokenId);
+
+      if (result.orderId) {
+        // Track the sell order (store buyPrice in targetSellPrice for profit calc)
+        activeOrders.set(result.orderId, {
+          market: position.market,
+          tokenId,
+          side: "SELL",
+          price: position.targetSellPrice,
+          size: position.size,
+          targetSellPrice: position.buyPrice, // Store buy price for profit calculation
+          placedAt: Date.now(),
+        });
+      }
+      log(`     ✅ SELL order placed: ${result.orderId}`);
+    } else {
+      log(`     ❌ SELL failed: ${result.error}`);
+    }
+  }
+}
+
+/**
+ * Cancel orders that have exceeded TTL
+ */
+async function cancelStaleOrders(): Promise<void> {
+  const now = Date.now();
+  const staleOrderIds: string[] = [];
+
+  for (const [orderId, order] of Array.from(activeOrders.entries())) {
+    const age = now - order.placedAt;
+    if (age > CONFIG.ORDER_TTL_MS) {
+      staleOrderIds.push(orderId);
+    }
+  }
+
+  if (staleOrderIds.length === 0) return;
+
+  log(`Cancelling ${staleOrderIds.length} stale orders (>${CONFIG.ORDER_TTL_MS / 1000}s old)...`);
+
+  for (const orderId of staleOrderIds) {
+    const order = activeOrders.get(orderId)!;
+
+    if (orderId.startsWith("dry-run-")) {
+      log(`  [DRY RUN] Would cancel: ${order.market}`);
+      activeOrders.delete(orderId);
+      stats.ordersCancelled++;
+      continue;
+    }
+
+    const cancelled = await cancelOrder(orderId);
+    if (cancelled) {
+      log(`  ❌ Cancelled stale order: ${order.market}`);
+      activeOrders.delete(orderId);
+      stats.ordersCancelled++;
+    }
   }
 }
 
@@ -118,6 +297,15 @@ async function scan(): Promise<void> {
   log(`Scan #${stats.scansCompleted} | Mode: ${CONFIG.DRY_RUN ? "DRY RUN" : "🔴 LIVE"}`);
   log("=".repeat(70));
 
+  // Step 1: Check for filled orders and update positions
+  await checkOrderFills();
+
+  // Step 2: Place SELL orders for any positions we're holding
+  await sellPositions();
+
+  // Step 3: Cancel stale orders that exceeded TTL
+  await cancelStaleOrders();
+
   // Check safety limits
   const netPnL = stats.totalProfit - stats.totalLoss;
   if (netPnL < -CONFIG.MAX_DAILY_LOSS) {
@@ -125,10 +313,12 @@ async function scan(): Promise<void> {
     return;
   }
 
-  // Check max open orders
-  const openOrders = await getOpenOrders();
-  if (openOrders.length >= CONFIG.MAX_OPEN_ORDERS) {
-    log(`Max open orders reached (${openOrders.length}/${CONFIG.MAX_OPEN_ORDERS})`);
+  // Check max open orders (from our tracking, not API - more accurate)
+  const buyOrderCount = Array.from(activeOrders.values()).filter(o => o.side === "BUY").length;
+  if (buyOrderCount >= CONFIG.MAX_OPEN_ORDERS) {
+    log(`Max open BUY orders reached (${buyOrderCount}/${CONFIG.MAX_OPEN_ORDERS})`);
+    log("");
+    printStats();
     return;
   }
 
@@ -141,6 +331,8 @@ async function scan(): Promise<void> {
   log(`Found ${opportunities.length} opportunities (>${CONFIG.MIN_SPREAD_PCT}% spread)`);
 
   if (opportunities.length === 0) {
+    log("");
+    printStats();
     return;
   }
 
@@ -154,14 +346,22 @@ async function scan(): Promise<void> {
   });
 
   // Trade on the best opportunity (if we have room for orders)
-  if (openOrders.length < CONFIG.MAX_OPEN_ORDERS && opportunities.length > 0) {
+  if (buyOrderCount < CONFIG.MAX_OPEN_ORDERS && opportunities.length > 0) {
     log("");
     await checkAndTrade(opportunities[0]);
   }
 
   // Print stats
   log("");
-  log(`Stats: Orders=${stats.ordersPlaced} | Open=${openOrders.length} | P&L=$${netPnL.toFixed(2)}`);
+  printStats();
+}
+
+function printStats(): void {
+  const netPnL = stats.totalProfit - stats.totalLoss;
+  const buyOrders = Array.from(activeOrders.values()).filter(o => o.side === "BUY").length;
+  const sellOrders = Array.from(activeOrders.values()).filter(o => o.side === "SELL").length;
+
+  log(`Stats: BUY=${buyOrders} SELL=${sellOrders} Positions=${positions.size} | Filled=${stats.ordersFilled} Cancelled=${stats.ordersCancelled} | P&L=$${netPnL.toFixed(2)}`);
 }
 
 async function main(): Promise<void> {
@@ -185,6 +385,11 @@ async function main(): Promise<void> {
   console.log(`  Max Open Orders: ${CONFIG.MAX_OPEN_ORDERS}`);
   console.log(`  Max Daily Loss: $${CONFIG.MAX_DAILY_LOSS}`);
   console.log(`  Poll Interval: ${CONFIG.POLL_INTERVAL_MS / 1000}s`);
+  console.log(`  Order TTL: ${CONFIG.ORDER_TTL_MS / 1000}s`);
+  console.log("");
+  console.log("Strategy: Buy at bid → Sell at ask → Capture spread");
+  console.log(`  - Unfilled orders cancelled after ${CONFIG.ORDER_TTL_MS / 60000} minutes`);
+  console.log(`  - Filled BUY orders automatically get SELL orders placed`);
   console.log("");
 
   if (!CONFIG.DRY_RUN) {

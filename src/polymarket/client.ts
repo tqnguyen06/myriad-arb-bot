@@ -106,6 +106,22 @@ export async function getOpenOrders(): Promise<unknown[]> {
 }
 
 /**
+ * Get a specific order by ID
+ */
+export async function getOrder(orderId: string): Promise<unknown> {
+  if (!client) throw new Error("Client not initialized");
+  return client.getOrder(orderId);
+}
+
+/**
+ * Get recent trades for the wallet
+ */
+export async function getTrades(): Promise<unknown[]> {
+  if (!client) throw new Error("Client not initialized");
+  return client.getTrades() as Promise<unknown[]>;
+}
+
+/**
  * Get balances/positions
  */
 export async function getBalances(): Promise<unknown> {
