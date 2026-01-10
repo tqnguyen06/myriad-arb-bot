@@ -1,18 +1,25 @@
 {
-  "name": "myriad-arb-bot",
-  "version": "1.0.0",
-  "description": "Arbitrage bot for Myriad Markets on Abstract Chain",
+  "name": "prediction-market-arb-bot",
+  "version": "2.0.0",
+  "description": "Arbitrage bot for Polymarket and Myriad Markets",
   "main": "dist/bot.js",
   "scripts": {
     "build": "tsc",
-    "start": "tsx src/bot.ts",
-    "bot": "tsx src/bot.ts",
-    "scan": "tsx src/scan.ts",
+    "start": "tsx src/polymarket/bot.ts",
+    "poly:bot": "tsx src/polymarket/bot.ts",
+    "poly:scan": "tsx src/polymarket/scan.ts",
+    "poly:setup": "tsx src/polymarket/setup-keys.ts",
+    "poly:trade": "tsx src/polymarket/trader.ts",
+    "myriad:bot": "tsx src/bot.ts",
+    "myriad:scan": "tsx src/scan.ts",
+    "scan": "tsx src/polymarket/scan.ts",
     "discover": "tsx src/discover.ts"
   },
   "dependencies": {
-    "viem": "^2.21.0",
-    "dotenv": "^16.4.5"
+    "@polymarket/clob-client": "^5.2.0",
+    "dotenv": "^16.4.5",
+    "ethers": "^5.8.0",
+    "viem": "^2.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
