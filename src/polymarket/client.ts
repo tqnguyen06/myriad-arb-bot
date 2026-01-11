@@ -133,6 +133,15 @@ export async function getBalances(): Promise<unknown> {
   return { address: walletAddress };
 }
 
+/**
+ * Get USDC balance (in dollars)
+ */
+export async function getUsdcBalance(): Promise<number> {
+  if (!client) throw new Error("Client not initialized");
+  const balance = await client.getBalanceAllowance({ asset_type: "COLLATERAL" });
+  return parseInt(balance.balance) / 1e6;
+}
+
 // Conditional Token Framework contract
 const CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 

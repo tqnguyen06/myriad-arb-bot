@@ -19,6 +19,7 @@ import {
   getWalletAddress,
   getTrades,
   getTokenBalance,
+  getUsdcBalance,
 } from "./client.js";
 
 // Configuration
@@ -26,8 +27,8 @@ const CONFIG = {
   DRY_RUN: process.env.POLY_DRY_RUN !== "false", // Default to dry run
   MIN_SPREAD_PCT: parseFloat(process.env.POLY_MIN_SPREAD || "3"), // 3% minimum
   MIN_VOLUME_24HR: parseFloat(process.env.POLY_MIN_VOLUME || "10000"), // $10k volume
-  MAX_ORDER_SIZE: parseFloat(process.env.POLY_MAX_ORDER || "10"), // $10 per order
-  MAX_OPEN_ORDERS: parseInt(process.env.POLY_MAX_ORDERS || "5"), // Max 5 orders
+  MAX_ORDER_SIZE: parseFloat(process.env.POLY_MAX_ORDER || "5"), // $5 per order (conservative)
+  MAX_OPEN_ORDERS: parseInt(process.env.POLY_MAX_ORDERS || "2"), // Max 2 open orders
   POLL_INTERVAL_MS: parseInt(process.env.POLY_POLL_INTERVAL || "60000"), // 60 seconds
   MAX_DAILY_LOSS: parseFloat(process.env.POLY_MAX_LOSS || "50"), // Stop if down $50
   ORDER_TTL_MS: parseInt(process.env.POLY_ORDER_TTL || "300000"), // 5 minutes TTL for orders
@@ -133,6 +134,82 @@ async function loadExistingPositions(): Promise<void> {
   }
 }
 
+/**
+ * Calculate available USDC balance (total minus committed in open BUY orders)
+ */
+async function getAvailableUsdc(): Promise<{ total: number; committed: number; available: number }> {
+  const total = await getUsdcBalance();
+
+  // Get committed amount from both tracked orders and API orders
+  let committed = 0;
+
+  // From our tracked active BUY orders
+  for (const order of activeOrders.values()) {
+    if (order.side === "BUY") {
+      committed += order.price * order.size;
+    }
+  }
+
+  // Also check API for any orders we're not tracking
+  try {
+    const apiOrders = (await getOpenOrders()) as Array<Record<string, unknown>>;
+    for (const order of apiOrders) {
+      const side = String(order.side || "").toUpperCase();
+      if (side === "BUY") {
+        const size = parseFloat(String(order.original_size || order.size || 0));
+        const price = parseFloat(String(order.price || 0));
+        const orderId = String(order.id || "");
+        // Don't double-count orders we're already tracking
+        if (!activeOrders.has(orderId)) {
+          committed += size * price;
+        }
+      }
+    }
+  } catch (error) {
+    log(`Warning: Could not check API orders: ${error}`);
+  }
+
+  const available = Math.max(0, total - committed);
+  return { total, committed, available };
+}
+
+/**
+ * Calculate available shares for a token (total minus committed in open SELL orders)
+ */
+async function getAvailableShares(tokenId: string): Promise<{ total: number; committed: number; available: number }> {
+  const total = await getTokenBalance(tokenId);
+
+  let committed = 0;
+
+  // From our tracked active SELL orders
+  for (const order of activeOrders.values()) {
+    if (order.side === "SELL" && order.tokenId === tokenId) {
+      committed += order.size;
+    }
+  }
+
+  // Also check API for any SELL orders we're not tracking
+  try {
+    const apiOrders = (await getOpenOrders()) as Array<Record<string, unknown>>;
+    for (const order of apiOrders) {
+      const side = String(order.side || "").toUpperCase();
+      const assetId = String(order.asset_id || "");
+      if (side === "SELL" && assetId === tokenId) {
+        const size = parseFloat(String(order.original_size || order.size || 0));
+        const orderId = String(order.id || "");
+        if (!activeOrders.has(orderId)) {
+          committed += size;
+        }
+      }
+    }
+  } catch (error) {
+    log(`Warning: Could not check API orders: ${error}`);
+  }
+
+  const available = Math.max(0, total - committed);
+  return { total, committed, available };
+}
+
 async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
   const market = opportunity.market;
 
@@ -161,9 +238,18 @@ async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
     return;
   }
 
-  // Calculate number of shares from USDC budget
+  // Check available USDC before placing order
+  const usdcInfo = await getAvailableUsdc();
+  log(`  USDC: $${usdcInfo.total.toFixed(2)} total, $${usdcInfo.committed.toFixed(2)} in orders, $${usdcInfo.available.toFixed(2)} available`);
+
+  if (usdcInfo.available < 1) {
+    log(`  Insufficient available USDC: $${usdcInfo.available.toFixed(2)} < $1 minimum`);
+    return;
+  }
+
+  // Calculate number of shares from available USDC (capped at MAX_ORDER_SIZE)
   // size parameter = number of shares, not USDC amount
-  const usdcBudget = CONFIG.MAX_ORDER_SIZE;
+  const usdcBudget = Math.min(CONFIG.MAX_ORDER_SIZE, usdcInfo.available);
   const buyPrice = bestBid;
   const numShares = Math.floor(usdcBudget / buyPrice); // How many shares we can buy
   const orderValue = numShares * buyPrice; // Actual USDC spent
@@ -316,13 +402,31 @@ async function sellPositions(): Promise<void> {
       }
     }
 
-    log(`  Selling ${position.size} shares of ${position.market} @ ${sellPrice}`);
+    // Check available shares before selling
+    const sharesInfo = await getAvailableShares(tokenId);
+    log(`  Shares for ${tokenId.slice(0, 15)}...: ${sharesInfo.total.toFixed(0)} total, ${sharesInfo.committed.toFixed(0)} in orders, ${sharesInfo.available.toFixed(0)} available`);
+
+    if (sharesInfo.available < 1) {
+      log(`  Insufficient available shares: ${sharesInfo.available.toFixed(0)} < 1`);
+      positions.delete(tokenId); // Remove from positions - already have SELL order out
+      continue;
+    }
+
+    // Adjust sell size to available shares
+    const sellSize = Math.min(position.size, Math.floor(sharesInfo.available));
+    if (sellSize < 1) {
+      log(`  Sell size too small after adjustment: ${sellSize}`);
+      positions.delete(tokenId);
+      continue;
+    }
+
+    log(`  Selling ${sellSize} shares of ${position.market} @ ${sellPrice}`);
 
     const result = await placeLimitOrder(
       tokenId,
       "SELL",
       sellPrice,
-      position.size,
+      sellSize,
       CONFIG.DRY_RUN
     );
 
@@ -337,7 +441,7 @@ async function sellPositions(): Promise<void> {
           tokenId,
           side: "SELL",
           price: sellPrice,
-          size: position.size,
+          size: sellSize, // Use adjusted sell size
           targetSellPrice: position.buyPrice, // Store buy price for profit calculation
           placedAt: Date.now(),
         });
