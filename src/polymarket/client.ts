@@ -206,6 +206,19 @@ export async function placeLimitOrder(
   try {
     const orderSide = side === "BUY" ? Side.BUY : Side.SELL;
 
+    // Sync balance/allowance with CLOB server before placing order
+    try {
+      if (side === "BUY") {
+        await client.updateBalanceAllowance({ asset_type: "COLLATERAL" });
+      }
+      await client.updateBalanceAllowance({
+        asset_type: "CONDITIONAL",
+        token_id: tokenId,
+      });
+    } catch (syncError) {
+      console.log(`Balance sync warning: ${syncError}`);
+    }
+
     const response = await client.createAndPostOrder({
       tokenID: tokenId,
       price: price,
