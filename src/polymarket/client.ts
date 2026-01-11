@@ -218,10 +218,11 @@ export async function placeLimitOrder(
       const resp = response as Record<string, unknown>;
       if (resp.error || resp.status === 400) {
         const errorMsg = String(resp.error || "Order rejected");
-        console.error(`Order rejected:`, errorMsg);
+        console.error(`${side} order rejected for token ${tokenId.slice(0, 20)}...:`, errorMsg);
+        console.error(`  Price: ${price}, Size: ${size}`);
         return {
           success: false,
-          error: errorMsg,
+          error: `${side}: ${errorMsg}`,
           details,
         };
       }
