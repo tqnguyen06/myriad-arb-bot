@@ -6,6 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 const CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"; // Conditional Token Framework
 const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"; // CTF Exchange
 const NEG_RISK_CTF_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a"; // Neg Risk CTF Exchange
+const NEG_RISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"; // Neg Risk Adapter
 
 const ctfAbi = [
   {
@@ -100,6 +101,29 @@ async function main() {
     console.log("  TX:", hash2);
     await publicClient.waitForTransactionReceipt({ hash: hash2 });
     console.log("  ✅ Neg Risk CTF Exchange approved!");
+  }
+
+  // Approve Neg Risk Adapter
+  console.log("Approving Neg Risk Adapter...");
+  const isAdapterApproved = await publicClient.readContract({
+    address: CTF_CONTRACT,
+    abi: ctfAbi,
+    functionName: "isApprovedForAll",
+    args: [account.address, NEG_RISK_ADAPTER],
+  });
+
+  if (isAdapterApproved) {
+    console.log("  Already approved!");
+  } else {
+    const hash3 = await walletClient.writeContract({
+      address: CTF_CONTRACT,
+      abi: ctfAbi,
+      functionName: "setApprovalForAll",
+      args: [NEG_RISK_ADAPTER, true],
+    });
+    console.log("  TX:", hash3);
+    await publicClient.waitForTransactionReceipt({ hash: hash3 });
+    console.log("  ✅ Neg Risk Adapter approved!");
   }
 
   console.log("\nDone! You can now sell your shares.");

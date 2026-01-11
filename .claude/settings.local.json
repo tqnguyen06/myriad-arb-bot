@@ -17,7 +17,14 @@
       "Bash(timeout 25 npm run poly:trade:*)",
       "Bash(timeout 30 npm run poly:trade:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(npm show:*)",
+      "Bash(timeout 45 npx tsx -e:*)",
+      "Bash(timeout 60 npx tsx:*)",
+      "Bash(timeout 90 npx tsx:*)",
+      "Bash(npx tsc:*)",
+      "Bash(git restore:*)",
+      "Bash(timeout 120 npx tsx:*)"
     ]
   }
 }
