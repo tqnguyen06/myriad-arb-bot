@@ -17,6 +17,8 @@ import {
   getOpenOrders,
   getOrder,
   getWalletAddress,
+  getTrades,
+  getTokenBalance,
 } from "./client.js";
 
 // Configuration
@@ -70,6 +72,65 @@ let positions: Map<string, Position> = new Map(); // tokenId -> Position
 
 function log(msg: string) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
+}
+
+/**
+ * Load existing positions from recent trades on startup.
+ * This handles the case where the bot restarts and has positions it doesn't know about.
+ */
+async function loadExistingPositions(): Promise<void> {
+  log("Loading existing positions from trades...");
+
+  try {
+    const trades = (await getTrades()) as Array<Record<string, unknown>>;
+    log(`Found ${trades.length} recent trades`);
+
+    // Track unique token IDs where we were the maker on BUY side
+    const tokenIds = new Set<string>();
+    const walletAddr = getWalletAddress().toLowerCase();
+
+    for (const trade of trades) {
+      const makerOrders = trade.maker_orders as Array<Record<string, unknown>> | undefined;
+      if (!makerOrders) continue;
+
+      for (const makerOrder of makerOrders) {
+        const makerAddr = String(makerOrder.maker_address || "").toLowerCase();
+        const side = String(makerOrder.side || "").toUpperCase();
+        const assetId = String(makerOrder.asset_id || "");
+
+        // If we were the maker on a BUY order, we may own these tokens
+        if (makerAddr === walletAddr && side === "BUY" && assetId) {
+          tokenIds.add(assetId);
+        }
+      }
+    }
+
+    log(`Found ${tokenIds.size} unique tokens from our BUY trades`);
+
+    // Check on-chain balance for each token
+    for (const tokenId of tokenIds) {
+      const balance = await getTokenBalance(tokenId);
+
+      if (balance > 0) {
+        log(`  Found position: ${balance} shares of token ${tokenId.slice(0, 20)}...`);
+
+        // Add to positions for selling
+        // Use a conservative sell price - we'll update it when we try to sell
+        positions.set(tokenId, {
+          tokenId,
+          market: "Loaded from trades",
+          size: Math.floor(balance), // Use whole shares
+          buyPrice: 0, // Unknown - will calculate profit from current price
+          targetSellPrice: 0, // Will be set when we try to sell
+          acquiredAt: Date.now(),
+        });
+      }
+    }
+
+    log(`Loaded ${positions.size} positions to sell`);
+  } catch (error) {
+    log(`Failed to load existing positions: ${error}`);
+  }
 }
 
 async function checkAndTrade(opportunity: SpreadOpportunity): Promise<void> {
@@ -219,12 +280,48 @@ async function sellPositions(): Promise<void> {
   log(`Placing SELL orders for ${positions.size} positions...`);
 
   for (const [tokenId, position] of Array.from(positions.entries())) {
-    log(`  Selling ${position.size} shares of ${position.market} @ ${position.targetSellPrice}`);
+    let sellPrice = position.targetSellPrice;
+
+    // If we don't have a target sell price (loaded position), get current ask
+    if (sellPrice <= 0) {
+      try {
+        const orderbook = await getOrderbook(tokenId);
+        if (!orderbook) {
+          log(`  No orderbook for ${tokenId.slice(0, 20)}..., skipping`);
+          continue;
+        }
+
+        // Get best ask (lowest ask price) and best bid (highest bid price)
+        const bestAsk = orderbook.asks.length > 0
+          ? Math.min(...orderbook.asks.map(a => a.price))
+          : 0;
+        const bestBid = orderbook.bids.length > 0
+          ? Math.max(...orderbook.bids.map(b => b.price))
+          : 0;
+
+        if (bestAsk > 0) {
+          sellPrice = bestAsk;
+          log(`  Got current ask price: ${sellPrice} for ${tokenId.slice(0, 20)}...`);
+        } else if (bestBid > 0) {
+          // No ask, use bid + 2% as sell price (try to capture some spread)
+          sellPrice = Math.round((bestBid * 1.02) * 1000) / 1000;
+          log(`  No ask, using bid+2%: ${sellPrice} for ${tokenId.slice(0, 20)}...`);
+        } else {
+          log(`  No orderbook data for ${tokenId.slice(0, 20)}..., skipping`);
+          continue;
+        }
+      } catch (error) {
+        log(`  Failed to get orderbook for ${tokenId.slice(0, 20)}...: ${error}`);
+        continue;
+      }
+    }
+
+    log(`  Selling ${position.size} shares of ${position.market} @ ${sellPrice}`);
 
     const result = await placeLimitOrder(
       tokenId,
       "SELL",
-      position.targetSellPrice,
+      sellPrice,
       position.size,
       CONFIG.DRY_RUN
     );
@@ -239,7 +336,7 @@ async function sellPositions(): Promise<void> {
           market: position.market,
           tokenId,
           side: "SELL",
-          price: position.targetSellPrice,
+          price: sellPrice,
           size: position.size,
           targetSellPrice: position.buyPrice, // Store buy price for profit calculation
           placedAt: Date.now(),
@@ -396,6 +493,9 @@ async function main(): Promise<void> {
     console.log("⚠️  LIVE TRADING ENABLED - Real money at risk!");
     console.log("   Press Ctrl+C to stop\n");
   }
+
+  // Load any existing positions from previous runs
+  await loadExistingPositions();
 
   // Graceful shutdown
   process.on("SIGINT", async () => {

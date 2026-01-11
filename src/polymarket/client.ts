@@ -7,6 +7,8 @@
 import "dotenv/config";
 import { ClobClient, Side, OrderType } from "@polymarket/clob-client";
 import { Wallet } from "ethers";
+import { createPublicClient, http, formatUnits } from "viem";
+import { polygon } from "viem/chains";
 
 const CLOB_HOST = "https://clob.polymarket.com";
 const CHAIN_ID = 137; // Polygon mainnet
@@ -129,6 +131,46 @@ export async function getBalances(): Promise<unknown> {
   // The CLOB client doesn't have a direct balance method
   // Positions can be checked via open orders and fills
   return { address: walletAddress };
+}
+
+// Conditional Token Framework contract
+const CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+
+const ctfAbi = [
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+/**
+ * Get the on-chain balance of a conditional token (shares owned)
+ */
+export async function getTokenBalance(tokenId: string): Promise<number> {
+  const viemClient = createPublicClient({
+    chain: polygon,
+    transport: http("https://polygon-rpc.com"),
+  });
+
+  try {
+    const balance = await viemClient.readContract({
+      address: CTF_CONTRACT,
+      abi: ctfAbi,
+      functionName: "balanceOf",
+      args: [walletAddress as `0x${string}`, BigInt(tokenId)],
+    });
+    // Conditional tokens have 6 decimals like USDC
+    return parseFloat(formatUnits(balance, 6));
+  } catch (error) {
+    console.error(`Failed to get token balance for ${tokenId}:`, error);
+    return 0;
+  }
 }
 
 /**
